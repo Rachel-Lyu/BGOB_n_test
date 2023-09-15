@@ -1,0 +1,9 @@
+setup.py
+BGOB/__init__.py
+BGOB/data_utils.py
+BGOB/model.py
+BGOB.egg-info/PKG-INFO
+BGOB.egg-info/SOURCES.txt
+BGOB.egg-info/dependency_links.txt
+BGOB.egg-info/requires.txt
+BGOB.egg-info/top_level.txt
