@@ -2,7 +2,7 @@
 Microbiome time series analysis - BGOB(Bidirectional GRU-ODE-Bayes) model
 
 ## Setting Up the Environment
-Before running `BGOB_n_test`, you need to create and activate the environment using Anaconda or Miniconda. This installs the package in 'editable' mode, allowing you to make changes to the source code and see the effects immediately.
+Before running BGOB with the testing code, you need to create and activate the environment using Anaconda or Miniconda. This installs the package in 'editable' mode, allowing you to make changes to the source code and see the effects immediately.
 
 ```bash
 conda create --name BGOB python=3
