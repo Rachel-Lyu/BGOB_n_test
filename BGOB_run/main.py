@@ -12,7 +12,7 @@ from BGOB import data_utils
 def setup_arg_parser():
     parser = argparse.ArgumentParser(description="BGOB")
     parser.add_argument('--model_name', type=str, help="Model to use", default="BGOB_TEST")
-    parser.add_argument('--dataset', type=str, help="Dataset CSV file", default="~/BGOB_run/demo.csv")
+    parser.add_argument('--dataset', type=str, help="Dataset CSV file", default="demo.csv")
     parser.add_argument("--with_mask", action="store_true", help="Input file has both 'Value_' columns and 'Mask_' columns", default=False)
     parser.add_argument('--seed', type=int, help="Seed for data split generation", default=100)
     parser.add_argument('--solver', type=str, choices=["euler", "midpoint","dopri5"], default="euler")
