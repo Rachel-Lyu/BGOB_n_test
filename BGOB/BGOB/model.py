@@ -6,7 +6,11 @@ from sklearn.preprocessing import MinMaxScaler
 
 def sigmoid(x):
     return 1 / (1 + math.exp(-x))
-
+def check_tensor(tensor, name):
+    if torch.isnan(tensor).any():
+        print(f"NaN detected in {name}")
+    if torch.isinf(tensor).any():
+        print(f"Inf detected in {name}")
 
 class GRUODECell(torch.nn.Module):
     def __init__(self, input_size, hidden_size, bias=True):
@@ -82,20 +86,61 @@ class GRUObservationCellLogvar(torch.nn.Module):
         self.input_size = input_size
         self.prep_hidden = prep_hidden
 
+    # def forward(self, h, p, X_obs, M_obs, i_obs):
+    #     p_obs = p[i_obs]
+
+    #     mean, logvar = torch.chunk(p_obs, 2, dim=1)
+    #     sigma = torch.exp(0.5 * logvar)
+    #     epsilon = 1e-6  # Small positive value
+    #     sigma_clamped = torch.clamp(sigma, min=epsilon)
+    #     error = (X_obs - mean) / sigma_clamped
+    #     # error = (X_obs - mean) / sigma
+
+    #     log_lik_c = np.log(np.sqrt(2 * np.pi))
+    #     losses = 0.5 * ((torch.pow(error, 2) + logvar + 2 * log_lik_c) * M_obs)
+
+    #     gru_input1 = torch.stack([X_obs, mean, logvar, error], dim=2).unsqueeze(2)
+    #     gru_input = torch.matmul(gru_input1, self.w_prep).squeeze(2) + self.bias_prep
+    #     gru_input.relu_()
+    #     # gru_input (sample x feature x prep_hidden)
+    #     gru_input = gru_input.permute(2, 0, 1)
+    #     gru_input = (
+    #         (gru_input * M_obs)
+    #         .permute(1, 2, 0)
+    #         .contiguous()
+    #         .view(-1, self.prep_hidden * self.input_size)
+    #     )
+
+    #     temp = h.clone()
+    #     temp[i_obs] = self.gru_d(gru_input, h[i_obs])
+    #     h = temp
+
+    #     return h, losses
+
     def forward(self, h, p, X_obs, M_obs, i_obs):
         p_obs = p[i_obs]
 
         mean, logvar = torch.chunk(p_obs, 2, dim=1)
-        sigma = torch.exp(0.5 * logvar)
-        error = (X_obs - mean) / sigma
+
+        min_logvar_value = -10
+        max_logvar_value = 10
+        logvar_clamped = torch.clamp(logvar, min=min_logvar_value, max=max_logvar_value)
+
+        sigma = torch.exp(0.5 * logvar_clamped)
+        epsilon = 1e-6
+        max_sigma_value = 1e6
+        sigma_clamped = torch.clamp(sigma, min=epsilon, max=max_sigma_value)
+
+        error = (X_obs - mean) / sigma_clamped
+        max_error_value = 1e6
+        error_clamped = torch.clamp(error, min=-max_error_value, max=max_error_value)
 
         log_lik_c = np.log(np.sqrt(2 * np.pi))
-        losses = 0.5 * ((torch.pow(error, 2) + logvar + 2 * log_lik_c) * M_obs)
+        losses = 0.5 * ((torch.pow(error_clamped, 2) + logvar_clamped + 2 * log_lik_c) * M_obs)
 
-        gru_input1 = torch.stack([X_obs, mean, logvar, error], dim=2).unsqueeze(2)
+        gru_input1 = torch.stack([X_obs, mean, logvar_clamped, error_clamped], dim=2).unsqueeze(2)
         gru_input = torch.matmul(gru_input1, self.w_prep).squeeze(2) + self.bias_prep
         gru_input.relu_()
-        # gru_input (sample x feature x prep_hidden)
         gru_input = gru_input.permute(2, 0, 1)
         gru_input = (
             (gru_input * M_obs)
@@ -109,6 +154,7 @@ class GRUObservationCellLogvar(torch.nn.Module):
         h = temp
 
         return h, losses
+
 
 
 def init_weights(m):
@@ -307,42 +353,101 @@ class bidirectional_gruodebayes(torch.nn.Module):
         self.hidden_size = hidden_size
         self.apply(init_weights)
 
+    # def ode_step(self, h, p, delta_t, current_time):
+    #     if self.impute is False:
+    #         p = torch.zeros_like(p)
+
+    #     if self.solver == "euler":
+    #         h = h + (delta_t) * self.gru_c(p, h)
+    #         p = self.p_model(h)
+
+    #     if self.solver == "midpoint":
+    #         k = h + (delta_t) / 2 * self.gru_c(p, h)
+    #         pk = self.p_model(k)
+
+    #         h = h + (delta_t) * self.gru_c(pk, k)
+    #         p = self.p_model(h)
+
+    #     current_time += delta_t
+    #     return h, p, current_time
     def ode_step(self, h, p, delta_t, current_time):
         if self.impute is False:
             p = torch.zeros_like(p)
 
+        # Define maximum allowed change in h
+        max_delta_h = 1.0  # Adjust this value based on your data
+
         if self.solver == "euler":
-            h = h + (delta_t) * self.gru_c(p, h)
+            delta_h = delta_t * self.gru_c(p, h)
+            # Clamp delta_h to prevent excessive updates
+            delta_h = torch.clamp(delta_h, min=-max_delta_h, max=max_delta_h)
+            h = h + delta_h
             p = self.p_model(h)
 
-        if self.solver == "midpoint":
-            k = h + (delta_t) / 2 * self.gru_c(p, h)
+        elif self.solver == "midpoint":
+            # First half-step
+            delta_h1 = (delta_t) / 2 * self.gru_c(p, h)
+            delta_h1 = torch.clamp(delta_h1, min=-max_delta_h, max=max_delta_h)
+            k = h + delta_h1
             pk = self.p_model(k)
-
-            h = h + (delta_t) * self.gru_c(pk, k)
+            # Second half-step
+            delta_h2 = delta_t * self.gru_c(pk, k)
+            delta_h2 = torch.clamp(delta_h2, min=-max_delta_h, max=max_delta_h)
+            h = h + delta_h2
             p = self.p_model(h)
 
         current_time += delta_t
         return h, p, current_time
 
-    def reverse_ode_step(self, h, p, delta_t, current_time):
 
+    # def reverse_ode_step(self, h, p, delta_t, current_time):
+
+    #     if self.impute is False:
+    #         p = torch.zeros_like(p)
+
+    #     if self.solver == "euler":
+    #         h = h + (delta_t) * self.gru_c(p, h)
+    #         p = self.p_model(h)
+
+    #     if self.solver == "midpoint":
+    #         k = h + (delta_t) / 2 * self.gru_c(p, h)
+    #         pk = self.p_model(k)
+
+    #         h = h + (delta_t) * self.gru_c(pk, k)
+    #         p = self.p_model(h)
+
+    #     current_time -= delta_t
+    #     return h, p, current_time
+
+    def reverse_ode_step(self, h, p, delta_t, current_time):
         if self.impute is False:
             p = torch.zeros_like(p)
 
+        # Define maximum allowed change in h
+        max_delta_h = 1.0  # Adjust this value based on your data
+
         if self.solver == "euler":
-            h = h + (delta_t) * self.gru_c(p, h)
+            delta_h = delta_t * self.gru_c(p, h)
+            # Clamp delta_h to prevent excessive updates
+            delta_h = torch.clamp(delta_h, min=-max_delta_h, max=max_delta_h)
+            h = h + delta_h
             p = self.p_model(h)
 
-        if self.solver == "midpoint":
-            k = h + (delta_t) / 2 * self.gru_c(p, h)
+        elif self.solver == "midpoint":
+            # First half-step
+            delta_h1 = (delta_t) / 2 * self.gru_c(p, h)
+            delta_h1 = torch.clamp(delta_h1, min=-max_delta_h, max=max_delta_h)
+            k = h + delta_h1
             pk = self.p_model(k)
-
-            h = h + (delta_t) * self.gru_c(pk, k)
+            # Second half-step
+            delta_h2 = delta_t * self.gru_c(pk, k)
+            delta_h2 = torch.clamp(delta_h2, min=-max_delta_h, max=max_delta_h)
+            h = h + delta_h2
             p = self.p_model(h)
 
         current_time -= delta_t
         return h, p, current_time
+
 
     def p_model(self, h):
         p = self.p_model_pre(h)
@@ -512,12 +617,28 @@ class bidirectional_gruodebayes(torch.nn.Module):
             return h, final_loss
 
 
+# def weight_add(a, b):
+#     path_t = range(min(len(a), len(b)))
+#     time_points = np.array(path_t).reshape(-1, 1)
+#     scaler = MinMaxScaler()
+#     scaler.fit(time_points)
+#     weight = scaler.transform(time_points).reshape(-1)
+#     final_list = []
+#     for i in range(len(weight)):
+#         final_list.append(a[i] * weight[i] + b[-1 - i] * (1 - weight[i]))
+
+#     return torch.stack(final_list)
+
+
 def weight_add(a, b):
     path_t = range(min(len(a), len(b)))
     time_points = np.array(path_t).reshape(-1, 1)
-    scaler = MinMaxScaler()
-    scaler.fit(time_points)
-    weight = scaler.transform(time_points).reshape(-1)
+    if time_points.max() - time_points.min() > 0:
+        scaler = MinMaxScaler()
+        scaler.fit(time_points)
+        weight = scaler.transform(time_points).reshape(-1)
+    else:
+        weight = np.ones_like(time_points).reshape(-1)
     final_list = []
     for i in range(len(weight)):
         final_list.append(a[i] * weight[i] + b[-1 - i] * (1 - weight[i]))
@@ -525,24 +646,60 @@ def weight_add(a, b):
     return torch.stack(final_list)
 
 
+# def compute_KL_loss(p_obs, X_obs, M_obs, obs_noise_std=1e-2, logvar=True):
+#     obs_noise_std = torch.tensor(obs_noise_std)
+#     if logvar:
+#         mean, var = torch.chunk(p_obs, 2, dim=1)
+#         max_var_value = 10  # Adjust based on acceptable range
+#         var_clamped = torch.clamp(var, max=max_var_value)
+#         std = torch.exp(0.5 * var_clamped)
+#         # std = torch.exp(0.5 * var)
+#     else:
+#         mean, var = torch.chunk(p_obs, 2, dim=1)
+#         std = torch.pow(torch.abs(var) + 1e-5, 0.5)
+
+#     return (
+#         gaussian_KL(mu_1=mean, mu_2=X_obs, sigma_1=std, sigma_2=obs_noise_std) * M_obs
+#     ).sum()
 def compute_KL_loss(p_obs, X_obs, M_obs, obs_noise_std=1e-2, logvar=True):
     obs_noise_std = torch.tensor(obs_noise_std)
+    epsilon = 1e-6
+    max_std_value = 1e6
     if logvar:
         mean, var = torch.chunk(p_obs, 2, dim=1)
-        std = torch.exp(0.5 * var)
+        min_var_value = -10
+        max_var_value = 10
+        var_clamped = torch.clamp(var, min=min_var_value, max=max_var_value)
+        std = torch.exp(0.5 * var_clamped)
     else:
         mean, var = torch.chunk(p_obs, 2, dim=1)
         std = torch.pow(torch.abs(var) + 1e-5, 0.5)
+    std_clamped = torch.clamp(std, min=epsilon, max=max_std_value)
 
     return (
-        gaussian_KL(mu_1=mean, mu_2=X_obs, sigma_1=std, sigma_2=obs_noise_std) * M_obs
+        gaussian_KL(mu_1=mean, mu_2=X_obs, sigma_1=std_clamped, sigma_2=obs_noise_std) * M_obs
     ).sum()
 
 
+
+# def gaussian_KL(mu_1, mu_2, sigma_1, sigma_2):
+#     return (
+#         torch.log(sigma_2)
+#         - torch.log(sigma_1)
+#         + (torch.pow(sigma_1, 2) + torch.pow((mu_1 - mu_2), 2)) / (2 * sigma_2 ** 2)
+#         - 0.5
+#     )
+
+
 def gaussian_KL(mu_1, mu_2, sigma_1, sigma_2):
-    return (
-        torch.log(sigma_2)
-        - torch.log(sigma_1)
-        + (torch.pow(sigma_1, 2) + torch.pow((mu_1 - mu_2), 2)) / (2 * sigma_2 ** 2)
-        - 0.5
-    )
+    epsilon = 1e-6
+    max_sigma_value = 1e6
+    sigma_1_clamped = torch.clamp(sigma_1, min=epsilon, max=max_sigma_value)
+    sigma_2_clamped = torch.clamp(sigma_2, min=epsilon, max=max_sigma_value)
+
+    log_sigma_1 = torch.log(sigma_1_clamped)
+    log_sigma_2 = torch.log(sigma_2_clamped)
+
+    term1 = log_sigma_2 - log_sigma_1
+    term2 = (torch.pow(sigma_1_clamped, 2) + torch.pow((mu_1 - mu_2), 2)) / (2 * sigma_2_clamped ** 2)
+    return term1 + term2 - 0.5
